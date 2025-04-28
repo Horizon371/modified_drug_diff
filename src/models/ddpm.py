@@ -409,17 +409,9 @@ class LatentDiffusion(pl.LightningModule):
 
         return normalized_tensor
 
-
     def target_function(self, sampled_mols, x_in):
-        with suppress_stdout_stderr():
-            oracle = Oracle("DRD2")
-
-            sampled_smiles = [self.one_hot_to_smiles(hot) for hot in sampled_mols]
-
-            reward = torch.tensor(oracle(sampled_smiles), device="cuda")
-
-            print("REWARD:", reward)
-
+       
+            reward = self.compute_reward(sampled_mols)
             log_prob = torch.log(torch.clamp(torch.abs(x_in), min=1e-10))  
             #subgradients = torch.where(results == 0, torch.tensor(0.0), torch.tensor(1.0), requires_grad=True)
             
@@ -428,21 +420,32 @@ class LatentDiffusion(pl.LightningModule):
 
             return loss, reward
 
-    
+    def compute_reward(self, sampled_mols):
+        with suppress_stdout_stderr():
 
-    def finite_difference_update_with_target_function(self, input, shape_1, epsilon_factor=1e-3):
+            oracle = Oracle("DRD2")
+            sampled_smiles = [self.one_hot_to_smiles(hot) for hot in sampled_mols]
+            reward = torch.tensor(oracle(sampled_smiles), device=sampled_mols.device)
+            return reward
+
+    def finite_difference_update_with_target_function(self, x_in, start_idx, end_idx, epsilon=0.1):
         """
         Update `zs` using finite differences (gradient estimation) with the `target_function` 
         for computing rewards.
         """
-        epsilon = epsilon_factor * torch.abs(input)
 
         # Ensure zs doesn't require gradients (no autograd)
         # input = input.detach()
 
         # Perturb zs to estimate gradient
-        reward_plus = self.target_function(input + epsilon)
-        reward_minus = self.target_function(input - epsilon)
+        x_plus = x_in + epsilon
+        x_minus = x_in - epsilon
+
+        sampled_plus = torch.exp(self.vae.decode(x_plus[start_idx:end_idx, :].to(self.device))) 
+        sammpled_minus = torch.exp(self.vae.decode(x_minus[start_idx:end_idx, :].to(self.device))) 
+
+        reward_plus = self.compute_reward(sampled_plus)
+        reward_minus = self.compute_reward(sammpled_minus)
 
         # global counter
         # counter += 1
@@ -451,8 +454,8 @@ class LatentDiffusion(pl.LightningModule):
         #     molecules = self.decode(zs, node_mask, edge_mask, context, fix_noise, dataset_info)
         #     print(molecules[0])
 
-        grad_est = (reward_plus - reward_minus) / (2 *  epsilon_factor)
-        grad_est = grad_est.unsqueeze(-1).repeat(1, shape_1)
+        grad_est = (reward_plus - reward_minus) / (2 *  epsilon)
+        grad_est = grad_est.unsqueeze(-1).repeat(1, x_in.shape[1])
 
         return grad_est
 
@@ -544,7 +547,7 @@ class LatentDiffusion(pl.LightningModule):
                         gene_in = self.geneX[start_idx:end_idx, :].detach().requires_grad_(False)
                         # mols_comb = torch.cat([sampled_mols.to(device), gene_in.to(device)],dim=1)
                         # log_probs = predictor_model(mols_comb.to(device))
-                        out = predictor_model(gene_in.to(self.device), sampled_mols.to(self.device)).squeeze()
+                        out = predictor_model(gene_in.to(self.device), sampled_mols.to(self.device)).squeeze()  
                         # out = log_probs[:,1]
 
                         # here out is not Min-max scaled, because it wasn't tested for L1000, but probably it can be applied here too
@@ -648,19 +651,22 @@ class LatentDiffusion(pl.LightningModule):
             # Decode and compute sampled molecules using the VAE
             sampled_mols = torch.exp(self.vae.decode(x_in[start_idx:end_idx, :].to(self.device))) 
 
-            for prop in self.classifiers.keys():                
-                #gradient = self.finite_difference_update_with_target_function(sampled_mols, x_in.shape[1])# out = out[:,1] # in case of binary classification, we take the second column (positive clas
-                #gradient = torch.autograd.grad(loss, x_in)[0] * classifier_scale 
-                loss, reward = self.target_function(sampled_mols, x_in)
-            
-            print("REWARD:", reward[:20, 0])
+            # for prop in self.classifiers.keys():                
+            #     pass   
 
-            entire_loss = loss.sum()
-            gradient = torch.autograd.grad(entire_loss, x_in)[0] * classifier_scale 
+            #loss, reward = self.target_function(sampled_mols, x_in)
+            #print("REWARD:", reward[:20, 0])
+
+            gradient = self.finite_difference_update_with_target_function(x_in, start_idx, end_idx) * classifier_scale
+    
+            #gradient = torch.autograd.grad(entire_loss, x_in)[0] * classifier_scale 
+
+
+            # entire_loss = loss.sum()
 
  
-            # Update the model mean
-            print(entire_loss,  gradient.sum())
+            # # Update the model mean
+            # print(entire_loss,  gradient.sum())
             print(gradient[0])
             model_mean = model_mean + model_variance * gradient
 
