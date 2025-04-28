@@ -83,13 +83,13 @@ class LatentDiffusion(pl.LightningModule):
         self.scale_losses_sampling = False
 
         # load symbol mappings and maximum molecule string length information from trained VAE
-        with open("D:\Projects\DrugDiff\data\zinc250k\\"+'symbol_to_idx.pickle', "rb") as input_file:
+        with open("data/zinc250k/"+'symbol_to_idx.pickle', "rb") as input_file:
             self.symbol_to_idx = pickle.load(input_file)
 
-        with open("D:\Projects\DrugDiff\data\zinc250k\\"+'idx_to_symbol.pickle', "rb") as input_file:
+        with open("data/zinc250k/"+'idx_to_symbol.pickle', "rb") as input_file:
             self.idx_to_symbol = pickle.load(input_file)
 
-        with open("D:\Projects\DrugDiff\data\zinc250k\\"+'dataset_max_len.pickle', "rb") as input_file:
+        with open("data/zinc250k/"+'dataset_max_len.pickle', "rb") as input_file:
             self.max_len = pickle.load(input_file)
    
         # Initialize the VAE model
@@ -100,6 +100,7 @@ class LatentDiffusion(pl.LightningModule):
             # This is used during generation with or without guidance and includes the VAE checkpoint used when orignally training the diffusion model.
             # Hence, explicit loading of a pre-trained VAE is not necessary
             print ('========== USING DDPM CHECKPOINT ===========')
+            #print(self.uncond_dm_ckpt)
 
             model_ckpt = torch.load(self.uncond_dm_ckpt,
                     map_location=torch.device(self.device))
@@ -415,15 +416,19 @@ class LatentDiffusion(pl.LightningModule):
 
             sampled_smiles = [self.one_hot_to_smiles(hot) for hot in sampled_mols]
 
-            reward = torch.tensor(oracle(sampled_smiles))
+            reward = torch.tensor(oracle(sampled_smiles), device="cuda")
+
+            print("REWARD:", reward)
+
             log_prob = torch.log(torch.clamp(torch.abs(x_in), min=1e-10))  
-            log_prob = log_prob.sum(dim=-1)
             #subgradients = torch.where(results == 0, torch.tensor(0.0), torch.tensor(1.0), requires_grad=True)
             
             reward = reward.unsqueeze(-1).expand_as(x_in)
             loss = log_prob * reward 
 
-            return loss
+            return loss, reward
+
+    
 
     def finite_difference_update_with_target_function(self, input, shape_1, epsilon_factor=1e-3):
         """
@@ -573,7 +578,8 @@ class LatentDiffusion(pl.LightningModule):
                 # Backpropagate gradients
                 gradient = torch.autograd.grad(loss, x_in)[0] * classifier_scale 
             # Update the model mean
-            print(gradient.sum())
+            print(loss,  gradient.sum())
+            print(gradient[0])
             model_mean = model_mean + model_variance * gradient
 
             
@@ -645,14 +651,16 @@ class LatentDiffusion(pl.LightningModule):
             for prop in self.classifiers.keys():                
                 #gradient = self.finite_difference_update_with_target_function(sampled_mols, x_in.shape[1])# out = out[:,1] # in case of binary classification, we take the second column (positive clas
                 #gradient = torch.autograd.grad(loss, x_in)[0] * classifier_scale 
-                loss = self.target_function(sampled_mols, x_in)
+                loss, reward = self.target_function(sampled_mols, x_in)
+            
+            print("REWARD:", reward[:20, 0])
 
-            entire_loss = loss.sum() * 0.1
+            entire_loss = loss.sum()
             gradient = torch.autograd.grad(entire_loss, x_in)[0] * classifier_scale 
 
  
             # Update the model mean
-            print(gradient.shape)
+            print(entire_loss,  gradient.sum())
             print(gradient[0])
             model_mean = model_mean + model_variance * gradient
 
@@ -725,7 +733,7 @@ class LatentDiffusion(pl.LightningModule):
             ts = torch.full((b,), i, device=device, dtype=torch.long) # tensor of timestep values matching the batch size
             
             # Sample from the diffusion model at this time step
-            latent, _ = self.p_sample_old(latent, ts, clip_denoised=self.clip_denoised, classifier_scale=classifier_scale,
+            latent, _ = self.p_sample(latent, ts, clip_denoised=self.clip_denoised, classifier_scale=classifier_scale,
                  start_idx = 0, end_idx = -1, log_mols_every_n = log_mols_every_n)
             # Use mask if given
             if mask is not None:
