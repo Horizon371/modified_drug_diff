@@ -18,7 +18,7 @@ from src.models.components.vae import PropertyPredictor
 
 input_dim = 1024 # do not change
 mlp_dims = 2048 # do not change
-num_sample_mols = 500 # how many molecules to generate
+num_sample_mols = 10 # how many molecules to generate
 uncond_dm_ckpt = REPO_PATH + '/model/drugdiff.ckpt'
 output_file = REPO_PATH+'/outputs/mol_weight_down_generation'
 

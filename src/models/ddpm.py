@@ -466,8 +466,6 @@ class LatentDiffusion(pl.LightningModule):
         # Compute finite differences gradients
         for i in range(x_in.shape[0]):  # Iterate over the batch (10000 samples)
             for j in range(x_in.shape[1]):  # Iterate over the features (1024 features per sample)
-                print(j)
-
                 # Perturb the j-th feature of the i-th sample
                 x_plus_epsilon = x_in.detach().clone() 
                 x_plus_epsilon[i, j] += epsilon  # Perturb in the positive direction
@@ -683,9 +681,9 @@ class LatentDiffusion(pl.LightningModule):
             # for prop in self.classifiers.keys():                
             #     pass   
 
-            #loss, reward = self.target_function(sampled_mols, x_in)
-            #print("REWARD:", reward[:20, 0])
-
+            reward = self.compute_reward(sampled_mols)
+            print(reward.mean())
+            
             gradient = self.finite_differences_matrix(x_in, start_idx, end_idx) * classifier_scale
     
             #gradient = torch.autograd.grad(entire_loss, x_in)[0] * classifier_scale 
