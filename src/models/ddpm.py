@@ -27,10 +27,21 @@ from statistics import median
 import sys
 import datetime
 import pathlib
+from contextlib import contextmanager,redirect_stderr,redirect_stdout
+from os import devnull
+from tdc import Oracle
 
 # Get the current file path and convert it to a Unix-style path for consistency
 FILE_PATH = str(pathlib.Path(__file__).parent.resolve())
 FILE_PATH = "/".join(FILE_PATH.split("\\"))
+FILE_PATH = ""
+
+@contextmanager
+def suppress_stdout_stderr():
+    """A context manager that redirects stdout and stderr to devnull"""
+    with open(devnull, 'w') as fnull:
+        with redirect_stderr(fnull) as err, redirect_stdout(fnull) as out:
+            yield (err, out)
 
 
 class LatentDiffusion(pl.LightningModule):
@@ -72,14 +83,13 @@ class LatentDiffusion(pl.LightningModule):
         self.scale_losses_sampling = False
 
         # load symbol mappings and maximum molecule string length information from trained VAE
-        with open(FILE_PATH + '/../../checkpoints/vae/'+'symbol_to_idx.pickle', "rb") as input_file:
+        with open("D:\Projects\DrugDiff\data\zinc250k\\"+'symbol_to_idx.pickle', "rb") as input_file:
             self.symbol_to_idx = pickle.load(input_file)
 
-        with open(FILE_PATH + '/../../checkpoints/vae/'+'idx_to_symbol.pickle', "rb") as input_file:
+        with open("D:\Projects\DrugDiff\data\zinc250k\\"+'idx_to_symbol.pickle', "rb") as input_file:
             self.idx_to_symbol = pickle.load(input_file)
 
-        with open(FILE_PATH + '/../../checkpoints/vae/'+'dataset_max_len.pickle', "rb") as input_file:
-
+        with open("D:\Projects\DrugDiff\data\zinc250k\\"+'dataset_max_len.pickle', "rb") as input_file:
             self.max_len = pickle.load(input_file)
    
         # Initialize the VAE model
@@ -399,8 +409,50 @@ class LatentDiffusion(pl.LightningModule):
         return normalized_tensor
 
 
+    def target_function(self, sampled_mols, x_in):
+        with suppress_stdout_stderr():
+            oracle = Oracle("DRD2")
+
+            sampled_smiles = [self.one_hot_to_smiles(hot) for hot in sampled_mols]
+
+            reward = torch.tensor(oracle(sampled_smiles))
+            log_prob = torch.log(torch.clamp(torch.abs(x_in), min=1e-10))  
+            log_prob = log_prob.sum(dim=-1)
+            #subgradients = torch.where(results == 0, torch.tensor(0.0), torch.tensor(1.0), requires_grad=True)
+            
+            reward = reward.unsqueeze(-1).expand_as(x_in)
+            loss = log_prob * reward 
+
+            return loss
+
+    def finite_difference_update_with_target_function(self, input, shape_1, epsilon_factor=1e-3):
+        """
+        Update `zs` using finite differences (gradient estimation) with the `target_function` 
+        for computing rewards.
+        """
+        epsilon = epsilon_factor * torch.abs(input)
+
+        # Ensure zs doesn't require gradients (no autograd)
+        # input = input.detach()
+
+        # Perturb zs to estimate gradient
+        reward_plus = self.target_function(input + epsilon)
+        reward_minus = self.target_function(input - epsilon)
+
+        # global counter
+        # counter += 1
+        # if counter % 100 == 0:
+        #     print(f"Reward plus: {reward_plus.mean().item()}, Reward minus: {reward_minus.mean().item()}")
+        #     molecules = self.decode(zs, node_mask, edge_mask, context, fix_noise, dataset_info)
+        #     print(molecules[0])
+
+        grad_est = (reward_plus - reward_minus) / (2 *  epsilon_factor)
+        grad_est = grad_est.unsqueeze(-1).repeat(1, shape_1)
+
+        return grad_est
+
     @torch.no_grad()
-    def p_sample(self, x, t, clip_denoised=False, repeat_noise=False,
+    def p_sample_old(self, x, t, clip_denoised=False, repeat_noise=False,
                  return_x0=True, temperature=1., noise_dropout=0., classifier_scale=1.,
                  start_idx = 0, end_idx = -1, log_mols_every_n = None):
         """
@@ -454,7 +506,7 @@ class LatentDiffusion(pl.LightningModule):
                 # Initialize loss to zero
                 loss = 0
                 # Detach and require gradients for the input tensor
-                x_in = x0.detach().requires_grad_(True)
+                x_in = x0.clone().detach().requires_grad_(True)
                 # Decode and compute sampled molecules using the VAE
                 sampled_mols = torch.exp(self.vae.decode(x_in[start_idx:end_idx, :].to(self.device))) 
 
@@ -469,8 +521,8 @@ class LatentDiffusion(pl.LightningModule):
                     ### FIX ###
                     # Remove use of REPO_PATH
 
-                    pathlib.Path(REPO_PATH + "/mol_over_t/" + datetime.datetime.now().strftime("%b-%d-%Y-%H") + '/').mkdir(parents=True, exist_ok=True)
-                    sampled_smiles_df.to_csv(REPO_PATH + "/mol_over_t/" + datetime.datetime.now().strftime("%b-%d-%Y-%H") + f'/mols-{str(int(t[0]))}-g-{str(int(classifier_scale))}')
+                    # pathlib.Path(REPO_PATH + "/mol_over_t/" + datetime.datetime.now().strftime("%b-%d-%Y-%H") + '/').mkdir(parents=True, exist_ok=True)
+                    # sampled_smiles_df.to_csv(REPO_PATH + "/mol_over_t/" + datetime.datetime.now().strftime("%b-%d-%Y-%H") + f'/mols-{str(int(t[0]))}-g-{str(int(classifier_scale))}')
 
                 # Masking parts of latent to fix substructure. Only experimental, to be revisited later.
                 # if self.substruct_smile:
@@ -521,6 +573,87 @@ class LatentDiffusion(pl.LightningModule):
                 # Backpropagate gradients
                 gradient = torch.autograd.grad(loss, x_in)[0] * classifier_scale 
             # Update the model mean
+            print(gradient.sum())
+            model_mean = model_mean + model_variance * gradient
+
+            
+        if return_x0:
+            return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise, x0
+        else:
+            return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
+
+
+    @torch.no_grad()
+    def p_sample(self, x, t, clip_denoised=False, repeat_noise=False,
+                 return_x0=True, temperature=1., noise_dropout=0., classifier_scale=1.,
+                 start_idx = 0, end_idx = -1, log_mols_every_n = None):
+        """
+        Samples from the diffusion process.
+
+        Args:
+            x (Tensor): Input tensor.
+            t (int): Time step.
+            clip_denoised (bool): Whether to clip denoised values. 
+            repeat_noise (bool): Whether to repeat noise for full batch. 
+            return_x0 (bool): Whether to return the predicted sample at t0. Defaults to True.
+            temperature (float): Temperature for sampling. Defaults to 1.
+            noise_dropout (float): Dropout rate for noise. Defaults to 0.
+            classifier_scale (float): Scale for classifier loss. Defaults to 1.
+            start_idx (int): Start index for diffusing and decoding in mini batches (if memory too loww for the whole batch). Defaults to 0.
+            end_idx (int): End index for diffusing and decoding in mini batches. Defaults to -1 (i.e. the full batch).
+            log_mols_every_n (int): Log molecules every n steps. Defaults to None.
+
+        Returns:
+            Tensor or tuple of Tensors: Sampled value(s).
+        """
+
+        # Get batch size, shape, and device from input tensor
+        b, *_, device = *x.shape, x.device
+        # Compute mean and variance of predicted nosie using the diffusion model
+        outputs = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised,
+                                       return_x0=return_x0)
+
+        # Unpack outputs based on whether x0 is returned
+        if return_x0:
+            model_mean, model_variance, model_log_variance, x0 = outputs
+        else:
+            model_mean, model_variance, model_log_variance = outputs
+
+        noise = noise_like(x.shape, device, repeat_noise) * temperature
+
+        # Apply dropout to noise if specified
+        if noise_dropout > 0.:
+            noise = torch.nn.functional.dropout(noise, p=noise_dropout)
+
+        # Create a mask to prevent noise from being added at time step 0
+        nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
+        
+        # Adjust end index to full batch if not specified otherwise
+        if end_idx == -1:
+            end_idx = x0.shape[0]
+
+
+        with torch.enable_grad():
+            # Initialize loss to zero
+            loss = 0
+            # Detach and require gradients for the input tensor
+            x_in = x0.clone().detach().requires_grad_(True)
+
+            # Decode and compute sampled molecules using the VAE
+            sampled_mols = torch.exp(self.vae.decode(x_in[start_idx:end_idx, :].to(self.device))) 
+
+            for prop in self.classifiers.keys():                
+                #gradient = self.finite_difference_update_with_target_function(sampled_mols, x_in.shape[1])# out = out[:,1] # in case of binary classification, we take the second column (positive clas
+                #gradient = torch.autograd.grad(loss, x_in)[0] * classifier_scale 
+                loss = self.target_function(sampled_mols, x_in)
+
+            entire_loss = loss.sum() * 0.1
+            gradient = torch.autograd.grad(entire_loss, x_in)[0] * classifier_scale 
+
+ 
+            # Update the model mean
+            print(gradient.shape)
+            print(gradient[0])
             model_mean = model_mean + model_variance * gradient
 
             
@@ -592,7 +725,7 @@ class LatentDiffusion(pl.LightningModule):
             ts = torch.full((b,), i, device=device, dtype=torch.long) # tensor of timestep values matching the batch size
             
             # Sample from the diffusion model at this time step
-            latent, _ = self.p_sample(latent, ts, clip_denoised=self.clip_denoised, classifier_scale=classifier_scale,
+            latent, _ = self.p_sample_old(latent, ts, clip_denoised=self.clip_denoised, classifier_scale=classifier_scale,
                  start_idx = 0, end_idx = -1, log_mols_every_n = log_mols_every_n)
             # Use mask if given
             if mask is not None:

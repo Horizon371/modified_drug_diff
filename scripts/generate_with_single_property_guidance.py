@@ -52,7 +52,7 @@ model.apply_guidance(classifiers = [classifier_mw],
                     # influences how strongly they are considered, e.g.
                     # propA has weight 1 and propB has weight 2 than propB is guided for twice as strongly.
                     weights = [-1], 
-                    properties = ['mol_weight'],
+                    properties = ['bioactivity'],
                     classifier_scales = [0, 50, 100, 150], # we include 0 (unguided) to have a reference for evaluation
                     sample_num = num_sample_mols, # how many molecules to generate (as defined above)
                     exp_name = output_file)

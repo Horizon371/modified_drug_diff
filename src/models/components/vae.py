@@ -87,7 +87,6 @@ class PropertyPredictor(pl.LightningModule):
                                 nn.ReLU(),
                                 nn.Linear(1000, 1))
         
-        
     def forward(self, x):
         return self.fc(x)
     
