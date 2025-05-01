@@ -409,7 +409,7 @@ class LatentDiffusion(pl.LightningModule):
 
         return normalized_tensor
 
-    def target_function(self, sampled_mols, x_in):
+    def compute_loss_guided(self, sampled_mols, x_in):
        
             reward = self.compute_reward(sampled_mols)
             log_prob = torch.log(torch.clamp(torch.abs(x_in), min=1e-10))  
@@ -428,7 +428,7 @@ class LatentDiffusion(pl.LightningModule):
             reward = torch.tensor(oracle(sampled_smiles), device=sampled_mols.device)
             return reward
 
-    def finite_difference_update_with_target_function(self, x_in, start_idx, end_idx, epsilon=1):
+    def finite_difference_update_with_target_function(self, x_in, start_idx, end_idx, epsilon=0.1):
         """
         Update `zs` using finite differences (gradient estimation) with the `target_function` 
         for computing rewards.
@@ -683,19 +683,20 @@ class LatentDiffusion(pl.LightningModule):
 
             reward = self.compute_reward(sampled_mols)
             print(reward.mean())
-            
-            gradient = self.finite_differences_matrix(x_in, start_idx, end_idx) * classifier_scale
+
+            if(classifier_scale > 0):
+                gradient = self.finite_difference_update_with_target_function(x_in, start_idx, end_idx) * classifier_scale
+        
+                #gradient = torch.autograd.grad(entire_loss, x_in)[0] * classifier_scale 
+
+
+                # entire_loss = loss.sum()
+
     
-            #gradient = torch.autograd.grad(entire_loss, x_in)[0] * classifier_scale 
-
-
-            # entire_loss = loss.sum()
-
- 
-            # # Update the model mean
-            # print(entire_loss,  gradient.sum())
-            print(gradient[0])
-            model_mean = model_mean + model_variance * gradient
+                # # Update the model mean
+                #print(entire_loss,  gradient.sum())
+                print(gradient[0])
+                model_mean = model_mean + model_variance * gradient
 
             
         if return_x0:
