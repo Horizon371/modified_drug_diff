@@ -30,6 +30,7 @@ import pathlib
 from contextlib import contextmanager,redirect_stderr,redirect_stdout
 from os import devnull
 from tdc import Oracle
+from src.models.trained_oracle import TrainedOracle
 
 # Get the current file path and convert it to a Unix-style path for consistency
 FILE_PATH = str(pathlib.Path(__file__).parent.resolve())
@@ -144,6 +145,9 @@ class LatentDiffusion(pl.LightningModule):
         self.vae.to(device)
         self.vae.encoder.to(device)
         self.vae.decoder.to(device)
+
+        self.oracle = Oracle("DRD2")
+        self.trained_oracle = TrainedOracle()
 
         print("***** INITIALIZATION IS FINISHED ******* ")
         
@@ -411,7 +415,7 @@ class LatentDiffusion(pl.LightningModule):
 
     def compute_loss_guided(self, sampled_mols, x_in):
        
-            reward = self.compute_reward(sampled_mols)
+            reward = self.compute_reward_drd2(sampled_mols)
             log_prob = torch.log(torch.clamp(torch.abs(x_in), min=1e-10))  
             #subgradients = torch.where(results == 0, torch.tensor(0.0), torch.tensor(1.0), requires_grad=True)
             
@@ -420,12 +424,17 @@ class LatentDiffusion(pl.LightningModule):
 
             return loss, reward
 
-    def compute_reward(self, sampled_mols):
+    def compute_reward_drd2(self, sampled_mols):
         with suppress_stdout_stderr():
-
-            oracle = Oracle("DRD2")
             sampled_smiles = [self.one_hot_to_smiles(hot) for hot in sampled_mols]
-            reward = torch.tensor(oracle(sampled_smiles), device=sampled_mols.device)
+            reward = torch.tensor(self.oracle(sampled_smiles), device=sampled_mols.device)
+            return reward
+        
+
+    def compute_reward_trained_predictive_model(self, sampled_mols):
+        with suppress_stdout_stderr():
+            sampled_smiles = [self.one_hot_to_smiles(hot) for hot in sampled_mols]
+            reward = torch.tensor(self.trained_oracle.score(sampled_smiles), device=sampled_mols.device)
             return reward
 
     def finite_difference_update_with_target_function(self, x_in, start_idx, end_idx, epsilon=0.1):
@@ -444,8 +453,8 @@ class LatentDiffusion(pl.LightningModule):
         sampled_plus = torch.exp(self.vae.decode(x_plus[start_idx:end_idx, :].to(self.device))) 
         sammpled_minus = torch.exp(self.vae.decode(x_minus[start_idx:end_idx, :].to(self.device))) 
 
-        reward_plus = self.compute_reward(sampled_plus)
-        reward_minus = self.compute_reward(sammpled_minus)
+        reward_plus = self.compute_reward_drd2(sampled_plus)
+        reward_minus = self.compute_reward_drd2(sammpled_minus)
 
         # global counter
         # counter += 1
@@ -474,10 +483,10 @@ class LatentDiffusion(pl.LightningModule):
                 
                 # Compute the reward for the perturbed inputs
                 sampled_plus = torch.exp(self.vae.decode(x_plus_epsilon[start_idx:end_idx, :].to(self.device))) 
-                reward_plus = self.compute_reward(sampled_plus[i].unsqueeze(0))   
+                reward_plus = self.compute_reward_drd2(sampled_plus[i].unsqueeze(0))   
 
                 sampled_minus= torch.exp(self.vae.decode(x_minus_epsilon[start_idx:end_idx, :].to(self.device))) 
-                reward_minus = self.compute_reward(sampled_minus[i].unsqueeze(0))    
+                reward_minus = self.compute_reward_drd2(sampled_minus[i].unsqueeze(0))    
 
                 # Apply central finite difference formula
                 gradients[i, j] = (reward_plus - reward_minus) / (2 * epsilon)
@@ -493,7 +502,7 @@ class LatentDiffusion(pl.LightningModule):
 
         # Compute finite differences gradients
         for i in range(x_in.shape[0]):  # Iterate over the batch (10000 samples)
-            reward_sampled = self.compute_reward(sampled[i].unsqueeze(0))    
+            reward_sampled = self.compute_reward_drd2(sampled[i].unsqueeze(0))    
             for j in range(x_in.shape[1]):  # Iterate over the features (1024 features per sample)
                 # Perturb the j-th feature of the i-th sample
                 x_plus_epsilon = x_in.detach().clone() 
@@ -502,7 +511,7 @@ class LatentDiffusion(pl.LightningModule):
                 sampled_plus = torch.exp(self.vae.decode(x_plus_epsilon[start_idx:end_idx, :].to(self.device))) 
 
                 # Compute the reward for the perturbed inputs
-                reward_plus = self.compute_reward(sampled_plus[i].unsqueeze(0))   
+                reward_plus = self.compute_reward_drd2(sampled_plus[i].unsqueeze(0))   
 
                 # Apply central finite difference formula
                 gradients[i, j] = (reward_plus - reward_sampled) / (2 * epsilon)
@@ -519,12 +528,12 @@ class LatentDiffusion(pl.LightningModule):
             perturbation[:, j] = epsilon  # Perturb in the positive direction
             x_plus_epsilon = x_in_device + perturbation
             sampled_plus = torch.exp(self.vae.decode(x_plus_epsilon[start_idx:end_idx, :]))
-            reward_plus = self.compute_reward(sampled_plus)
+            reward_plus = self.compute_reward_drd2(sampled_plus)
 
             perturbation[:, j] = -epsilon  # Perturb in the negative direction
             x_minus_epsilon = x_in_device + perturbation
             sampled_minus = torch.exp(self.vae.decode(x_minus_epsilon[start_idx:end_idx, :]))
-            reward_minus = self.compute_reward(sampled_minus)
+            reward_minus = self.compute_reward_drd2(sampled_minus)
 
             gradients[:, j] = (reward_plus - reward_minus) / (2 * epsilon)
 
@@ -552,7 +561,7 @@ class LatentDiffusion(pl.LightningModule):
 
             # Compute the reward for the perturbed inputs (positive direction)
             sampled_plus = torch.exp(self.vae.decode(x_plus_epsilon[start_idx:end_idx, :]))
-            reward_plus = self.compute_reward(sampled_plus)  # shape (batch_size,)
+            reward_plus = self.compute_reward_trained_predictive_model(sampled_plus)  # shape (batch_size,)
 
             # Perturb the j-th feature of all samples (negative perturbation)
             x_minus_epsilon = x_in_device.clone()
@@ -560,7 +569,7 @@ class LatentDiffusion(pl.LightningModule):
 
             # Compute the reward for the perturbed inputs (negative direction)
             sampled_minus = torch.exp(self.vae.decode(x_minus_epsilon[start_idx:end_idx, :]))
-            reward_minus = self.compute_reward(sampled_minus)  # shape (batch_size,)
+            reward_minus = self.compute_reward_trained_predictive_model(sampled_minus)  # shape (batch_size,)
 
             # Apply the central finite difference formula (using both perturbations)
             gradients[:, j] = (reward_plus - reward_minus) / (2 * epsilon)
@@ -572,7 +581,7 @@ class LatentDiffusion(pl.LightningModule):
         gradients = torch.zeros_like(x_in_device)
 
         batch_size, dim = x_in.shape
-        reward = self.compute_reward(torch.exp(self.vae.decode(x_in_device[start_idx:end_idx, :])))
+        reward = self.compute_reward_drd2(torch.exp(self.vae.decode(x_in_device[start_idx:end_idx, :])))
         for i in range(num_directions):
             # Sample a random direction vector (Rademacher or Gaussian)
             v = torch.randn_like(x_in_device)  # shape: (batch_size, dim)
@@ -581,7 +590,7 @@ class LatentDiffusion(pl.LightningModule):
             # Perturb in positive direction
             x_plus = x_in_device + epsilon * v
             sampled_plus = torch.exp(self.vae.decode(x_plus[start_idx:end_idx, :]))
-            reward_plus = self.compute_reward(sampled_plus)
+            reward_plus = self.compute_reward_drd2(sampled_plus)
 
             # Estimate directional derivative: scalar * vector
             grad_estimate = (((reward_plus - reward)) / epsilon).unsqueeze(1) * v
@@ -590,7 +599,6 @@ class LatentDiffusion(pl.LightningModule):
 
         gradients /= num_directions  # Average over directions
         return gradients
-
 
     @torch.no_grad()
     def p_sample_old(self, x, t, clip_denoised=False, repeat_noise=False,
@@ -724,7 +732,6 @@ class LatentDiffusion(pl.LightningModule):
         else:
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
-
     @torch.no_grad()
     def p_sample(self, x, t, clip_denoised=False, repeat_noise=False,
                  return_x0=True, temperature=1., noise_dropout=0., classifier_scale=1.,
@@ -786,7 +793,7 @@ class LatentDiffusion(pl.LightningModule):
         # for prop in self.classifiers.keys():                
         #     pass   
 
-        reward = self.compute_reward(sampled_mols)
+        reward = self.compute_reward_trained_predictive_model(sampled_mols)
         print(reward.mean())
 
         if(classifier_scale > 0):
@@ -801,6 +808,7 @@ class LatentDiffusion(pl.LightningModule):
             # # Update the model mean
             #print(entire_loss,  gradient.sum())
             #print(model_mean)
+            print(gradient[0])
             model_mean = model_mean + model_variance * gradient
             
         if return_x0:

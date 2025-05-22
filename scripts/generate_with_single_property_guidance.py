@@ -18,9 +18,9 @@ from src.models.components.vae import PropertyPredictor
 
 input_dim = 1024 # do not change
 mlp_dims = 2048 # do not change
-num_sample_mols = 50 # how many molecules to generate
+num_sample_mols = 10 # how many molecules to generate
 uncond_dm_ckpt = REPO_PATH + '/model/drugdiff.ckpt'
-output_file = REPO_PATH+'/outputs/zero_guidance_generation_50'
+output_file = REPO_PATH+'/outputs/trained_oracle_guidance_generation_10'
 
 ################################################################################################
 # load DrugDiff
@@ -53,6 +53,6 @@ model.apply_guidance(classifiers = [classifier_mw],
                     # propA has weight 1 and propB has weight 2 than propB is guided for twice as strongly.
                     weights = [-1], 
                     properties = ['bioactivity'],
-                    classifier_scales = [0, 150], # we include 0 (unguided) to have a reference for evaluation
+                    classifier_scales = [15], # we include 0 (unguided) to have a reference for evaluation
                     sample_num = num_sample_mols, # how many molecules to generate (as defined above)
                     exp_name = output_file)
