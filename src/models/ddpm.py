@@ -430,123 +430,11 @@ class LatentDiffusion(pl.LightningModule):
             reward = torch.tensor(self.oracle(sampled_smiles), device=sampled_mols.device)
             return reward
         
-
     def compute_reward_trained_predictive_model(self, sampled_mols):
         with suppress_stdout_stderr():
             sampled_smiles = [self.one_hot_to_smiles(hot) for hot in sampled_mols]
             reward = torch.tensor(self.trained_oracle.score(sampled_smiles), device=sampled_mols.device)
             return reward
-
-    def finite_difference_update_with_target_function(self, x_in, start_idx, end_idx, epsilon=0.1):
-        """
-        Update `zs` using finite differences (gradient estimation) with the `target_function` 
-        for computing rewards.
-        """
-
-        # Ensure zs doesn't require gradients (no autograd)
-        # input = input.detach()
-
-        # Perturb zs to estimate gradient
-        x_plus = x_in + epsilon
-        x_minus = x_in - epsilon
-
-        sampled_plus = torch.exp(self.vae.decode(x_plus[start_idx:end_idx, :].to(self.device))) 
-        sammpled_minus = torch.exp(self.vae.decode(x_minus[start_idx:end_idx, :].to(self.device))) 
-
-        reward_plus = self.compute_reward_drd2(sampled_plus)
-        reward_minus = self.compute_reward_drd2(sammpled_minus)
-
-        # global counter
-        # counter += 1
-        # if counter % 100 == 0:
-        #     print(f"Reward plus: {reward_plus.mean().item()}, Reward minus: {reward_minus.mean().item()}")
-        #     molecules = self.decode(zs, node_mask, edge_mask, context, fix_noise, dataset_info)
-        #     print(molecules[0])
-
-        grad_est = (reward_plus - reward_minus) / (2 * epsilon)
-        grad_est = grad_est.view(-1, 1).expand(-1, x_in.shape[1])
-
-        return grad_est
-
-    def finite_differences_matrix(self, x_in, start_idx, end_idx,epsilon = 1):
-        gradients = torch.zeros_like(x_in)
-
-        # Compute finite differences gradients
-        for i in range(x_in.shape[0]):  # Iterate over the batch (10000 samples)
-            for j in range(x_in.shape[1]):  # Iterate over the features (1024 features per sample)
-                # Perturb the j-th feature of the i-th sample
-                x_plus_epsilon = x_in.detach().clone() 
-                x_plus_epsilon[i, j] += epsilon  # Perturb in the positive direction
-                
-                x_minus_epsilon = x_in.detach().clone() 
-                x_minus_epsilon[i, j] -= epsilon  # Perturb in the negative direction
-                
-                # Compute the reward for the perturbed inputs
-                sampled_plus = torch.exp(self.vae.decode(x_plus_epsilon[start_idx:end_idx, :].to(self.device))) 
-                reward_plus = self.compute_reward_drd2(sampled_plus[i].unsqueeze(0))   
-
-                sampled_minus= torch.exp(self.vae.decode(x_minus_epsilon[start_idx:end_idx, :].to(self.device))) 
-                reward_minus = self.compute_reward_drd2(sampled_minus[i].unsqueeze(0))    
-
-                # Apply central finite difference formula
-                gradients[i, j] = (reward_plus - reward_minus) / (2 * epsilon)
-            print(gradients[i-1])
-        return gradients
-    
-
-
-    def finite_differences_matrix_optimized(self, x_in, start_idx, end_idx,epsilon = 1):
-        gradients = torch.zeros_like(x_in)
-        
-        sampled = torch.exp(self.vae.decode(x_in[start_idx:end_idx, :].to(self.device))) 
-
-        # Compute finite differences gradients
-        for i in range(x_in.shape[0]):  # Iterate over the batch (10000 samples)
-            reward_sampled = self.compute_reward_drd2(sampled[i].unsqueeze(0))    
-            for j in range(x_in.shape[1]):  # Iterate over the features (1024 features per sample)
-                # Perturb the j-th feature of the i-th sample
-                x_plus_epsilon = x_in.detach().clone() 
-                x_plus_epsilon[i, j] += 2 * epsilon  # Perturb in the positive direction
-
-                sampled_plus = torch.exp(self.vae.decode(x_plus_epsilon[start_idx:end_idx, :].to(self.device))) 
-
-                # Compute the reward for the perturbed inputs
-                reward_plus = self.compute_reward_drd2(sampled_plus[i].unsqueeze(0))   
-
-                # Apply central finite difference formula
-                gradients[i, j] = (reward_plus - reward_sampled) / (2 * epsilon)
-            # print(gradients[i-1])
-        return gradients
-
-    def finite_differences_matrix_optimized_2(self, x_in, start_idx, end_idx, epsilon=1):
-        x_in_device = x_in.to(self.device)
-        # sampled = torch.exp(self.vae.decode(x_in_device[start_idx:end_idx, :])) 
-        # reward_sampled = self.compute_reward(sampled)
-        gradients = torch.zeros_like(x_in_device)
-        perturbation = torch.zeros_like(x_in_device)
-        for j in range(x_in_device.shape[1]):  # Iterate over the features
-            perturbation[:, j] = epsilon  # Perturb in the positive direction
-            x_plus_epsilon = x_in_device + perturbation
-            sampled_plus = torch.exp(self.vae.decode(x_plus_epsilon[start_idx:end_idx, :]))
-            reward_plus = self.compute_reward_drd2(sampled_plus)
-
-            perturbation[:, j] = -epsilon  # Perturb in the negative direction
-            x_minus_epsilon = x_in_device + perturbation
-            sampled_minus = torch.exp(self.vae.decode(x_minus_epsilon[start_idx:end_idx, :]))
-            reward_minus = self.compute_reward_drd2(sampled_minus)
-
-            gradients[:, j] = (reward_plus - reward_minus) / (2 * epsilon)
-
-            perturbation[:, j] = 0
-        # for j in range(x_in_device.shape[1]):  # Iterate over the features
-        #     perturbation[:, j] = 2 * epsilon  # Perturb in the positive direction
-        #     x_plus_epsilon = x_in_device + perturbation
-        #     sampled_plus = torch.exp(self.vae.decode(x_plus_epsilon[start_idx:end_idx, :]))
-        #     reward_plus = self.compute_reward(sampled_plus)
-        #     gradients[:, j] = (reward_plus - reward_sampled) / (2 * epsilon)
-        #     perturbation[:, j] = 0
-
-        return gradients
     
     def finite_differences_matrix_optimized_central(self, x_in, start_idx, end_idx, epsilon=1):
         # Ensure everything is on the correct device
@@ -574,30 +462,6 @@ class LatentDiffusion(pl.LightningModule):
             # Apply the central finite difference formula (using both perturbations)
             gradients[:, j] = (reward_plus - reward_minus) / (2 * epsilon)
 
-        return gradients
-
-    def stochastic_finite_diff(self, x_in, start_idx, end_idx, epsilon=1, num_directions=10):
-        x_in_device = x_in.to(self.device)
-        gradients = torch.zeros_like(x_in_device)
-
-        batch_size, dim = x_in.shape
-        reward = self.compute_reward_drd2(torch.exp(self.vae.decode(x_in_device[start_idx:end_idx, :])))
-        for i in range(num_directions):
-            # Sample a random direction vector (Rademacher or Gaussian)
-            v = torch.randn_like(x_in_device)  # shape: (batch_size, dim)
-            v = v / torch.norm(v, dim=1, keepdim=True)  # optional: normalize
-
-            # Perturb in positive direction
-            x_plus = x_in_device + epsilon * v
-            sampled_plus = torch.exp(self.vae.decode(x_plus[start_idx:end_idx, :]))
-            reward_plus = self.compute_reward_drd2(sampled_plus)
-
-            # Estimate directional derivative: scalar * vector
-            grad_estimate = (((reward_plus - reward)) / epsilon).unsqueeze(1) * v
-
-            gradients += grad_estimate * 1e4
-
-        gradients /= num_directions  # Average over directions
         return gradients
 
     @torch.no_grad()
@@ -798,14 +662,7 @@ class LatentDiffusion(pl.LightningModule):
 
         if(classifier_scale > 0):
             gradient = self.finite_differences_matrix_optimized_central(x_in, start_idx, end_idx) * classifier_scale
-            
-            #gradient = torch.autograd.grad(entire_loss, x_in)[0] * classifier_scale 
 
-
-            # entire_loss = loss.sum()
-
-
-            # # Update the model mean
             #print(entire_loss,  gradient.sum())
             #print(model_mean)
             print(gradient[0])
